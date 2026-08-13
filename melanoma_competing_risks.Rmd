@@ -1,0 +1,847 @@
+---
+title: "Melanoma-Specific Mortality Under Competing Risks"
+author: "Kashyap Ava"
+date: "2026-08-12"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data of Interest
+
+
+```{r}
+# Danish Melanoma Competing-Risks Analysis
+
+library(tidyverse)
+library(here)
+
+# Load data
+data("melanoma", package = "boot")
+
+melanoma_raw <- melanoma
+
+dim(melanoma_raw)
+head(melanoma_raw, 10)
+```
+
+Publicly available information about the data set:
+
+The Melanoma data frame has data on 205 patients in Denmark with malignant melanoma.
+
+time: survival time in days, possibly censored. (Censoring is cutting off the days at an observed time saying that survival time is greater than that)
+
+status: 1 died from melanoma, 2 alive, 3 dead from other causes.
+
+sex: 1 = male, 0 = female.
+
+age: age in years.
+
+year: year of operation.
+
+thickness: tumor thickness in mm.
+
+ulcer: 1 = presence, 0 = absence.
+
+```{r}
+# Inspect original data
+summary(melanoma_raw)
+```
+
+## Question of Interest
+
+The data set already has the results of the treated patients so we would like to look at things retrospectively and answer the following question:
+
+1. How are patient age, sex, tumor thickness, and ulceration associated with melanoma-specific mortality? 
+
+2. How does explicitly accounting for death from other causes affect inference about melanoma mortality?
+
+
+Given the categorical nature, logistic regression might appear to be a relevant model but it does not make sense because:
+
+- It can only be used in modeling alive vs dead due to its binary nature and hence cannot be used for the whole data set
+
+- The time variable just becomes a numerical value and does not convey that it is an event related value.
+
+
+## Approach
+
+These questions involve two distinct quantities. 
+
+The cause-specific hazard describes the instantaneous rate of melanoma death among patients who remain event-free
+
+The cumulative incidence function describes the probability of experiencing melanoma death by a particular follow-up time in the presence of competing mortality. 
+
+Accordingly, cause-specific Cox regression is used for the former, while cumulative-incidence and Fine–Gray methods are used for the latter.
+
+
+## Data Preparation
+
+First lets look at the number of observations that belong to each class in the categorical variables status, sex and ulcer.
+
+```{r}
+table(melanoma_raw$status)
+table(melanoma_raw$sex)
+table(melanoma_raw$ulcer)
+```
+
+
+Since the variables status, sex and ulcer are categorical in nature, lets first rename them in terms of the categories they represent to aid in better inference.
+
+The status variable can also be encoded with actual meaning as it is categorical.
+
+
+```{r}
+library(dplyr)
+
+melanoma_analysis <- melanoma_raw |>
+  mutate(
+
+    # Rename follow-up days
+    time_days = time,
+
+    # Human-readable sex variable
+    sex_label = factor(
+      sex,
+      levels = c(0, 1),
+      labels = c("Female", "Male")
+    ),
+
+    # Human-readable ulceration variable
+    ulcer_label = factor(
+      ulcer,
+      levels = c(0, 1),
+      labels = c("Absent", "Present")
+    ),
+
+    # Human-readable outcome
+    status_label = factor(
+      status,
+      levels = c(1, 2, 3),
+      labels = c(
+        "Melanoma death",
+        "Alive/censored",
+        "Other-cause death"
+      )
+    )
+  )
+```
+
+For cause-specific Cox regression, lets code melanoma death as the event and both administrative censoring and code the other-cause death as non-melanoma events.
+
+
+```{r}
+melanoma_analysis <- melanoma_analysis |>
+  mutate(
+
+    melanoma_event = case_when(
+      status == 1 ~ 1L,
+      status == 2 ~ 0L,
+      status == 3 ~ 0L
+    )
+  )
+```
+
+For competing-risk analysis, lets retain the outcomes as three distinct states: censored/alive, melanoma death, and other-cause death.
+
+```{r}
+melanoma_analysis <- melanoma_analysis |>
+  mutate(
+
+    status_cr = case_when(
+      status == 1 ~ 1L,  # melanoma death
+      status == 2 ~ 0L,  # censored/alive
+      status == 3 ~ 2L   # competing death
+    )
+  )
+```
+
+
+```{r}
+head(
+  melanoma_analysis[
+    c(
+      "time_days",
+      "status",
+      "status_label",
+      "melanoma_event",
+      "status_cr",
+      "sex_label",
+      "age",
+      "thickness",
+      "ulcer_label"
+    )
+  ]
+)
+```
+
+
+```{r}
+melanoma_analysis |>
+  count(status_label) |>
+  mutate(
+    percent = 100 * n / sum(n)
+  )
+```
+
+The cohort contains 205 patients, of whom 57 (27.8%) died from melanoma, 14 (6.8%) died from another cause, and 134 (65.4%) were alive or censored at the end of follow-up.
+
+The presence of 14 other-cause deaths establishes a genuine competing-risk setting: once a patient dies from another cause, melanoma death can no longer occur. 
+
+Although competing deaths constitute a relatively small proportion of the cohort, their effect on absolute melanoma-mortality estimates should be evaluated rather than assumed to be negligible.
+
+## Addressing the cause-specific question
+
+```{r}
+library(survival)
+
+melanoma_surv <- with(
+  melanoma_analysis,
+  Surv(
+    time = time_days,
+    event = melanoma_event
+  )
+)
+
+head(melanoma_surv, 20)
+```
+
+
+```{r}
+cox_model <- coxph(
+  Surv(time_days, melanoma_event) ~
+    age +
+    sex_label +
+    thickness +
+    ulcer_label,
+  data = melanoma_analysis
+)
+
+summary(cox_model)
+```
+
+Lets look at the factors and their coefficients closely to interpret their effects.
+
+```{r}
+exp(
+  cbind(
+    HR = coef(cox_model),
+    confint(cox_model)
+  )
+)
+```
+
+In the initial adjusted model, greater tumor thickness and tumor ulceration were associated with higher melanoma-specific mortality. 
+
+Each additional millimeter of tumor thickness was associated with an estimated 11.5% higher cause-specific melanoma hazard, while patients with ulcerated tumors had approximately 3.2 times the hazard of patients without ulceration.
+
+Age and male sex had positive point estimates, but their 95% confidence intervals included 1, providing weaker evidence of independent associations after adjustment for the other covariates.
+
+The likelihood-ratio test provided strong evidence that the covariates collectively contributed to the model (p<0.001), while the concordance of 0.753 suggested reasonably good risk ranking. 
+
+Because the primary objective is inference rather than prediction, lets focus on on model assumptions rather than optimizing discrimination.
+
+
+## Assumptions of the model:
+
+Interpretation of a single Cox hazard ratio assumes proportional hazards: the relative hazard associated with a co-variate is approximately constant throughout follow-up. 
+
+Before interpreting the estimated hazard ratios as time-invariant effects, I therefore evaluated this assumption using scaled Schoenfeld residuals.
+
+
+```{r}
+ph_test <- cox.zph(cox_model)
+
+ph_test
+```
+
+Lets also look at the plots.
+
+
+```{r}
+plot(ph_test)
+```
+
+There was no strong evidence against proportional hazards for age or sex. 
+
+Ulceration showed some graphical variation over time but did not provide strong statistical evidence of non-proportionality.
+
+Tumor thickness, however, showed evidence of a violation (p=0.031). The smoothed Schoenfeld-residual curve suggested that the association between thickness and melanoma mortality was stronger during earlier follow-up and weakened with time.
+
+The global test was borderline (p=0.052), consistent with a model in which the main proportional-hazards concern was concentrated in tumor thickness.
+
+
+Lets examine the distributions of the factors.
+
+
+```{r}
+hist(
+  melanoma_analysis$thickness,
+  breaks = 25,
+  main = "Distribution of Tumor Thickness",
+  xlab = "Tumor thickness (mm)"
+)
+```
+
+
+```{r}
+hist(
+  melanoma_analysis$age,
+  breaks = 20,
+  main = "Distribution of Age",
+  xlab = "Age"
+)
+
+```
+
+Tumor thickness was strongly right-skewed, whereas age had a more approximately symmetric distribution. 
+
+However, Cox regression does not require covariates themselves to be normally distributed. Therefore, skewness alone was not considered sufficient justification for transforming thickness.
+
+A more relevant concern is whether continuous predictors have an approximately linear relationship with the log hazard. 
+
+The original Cox model assumes that each one-unit increase in age or thickness produces the same change in log hazard regardless of the starting value. I therefore evaluated whether either continuous covariate required a nonlinear functional form.
+
+Penalized spline terms were fitted as diagnostic extensions of the Cox model to determine whether allowing flexible nonlinear relationships for age or tumor thickness materially improved the representation of their effects.
+
+This analysis was not intended to maximize model complexity. Rather, the spline models were used to assess whether the simpler linear terms in the original Cox model were defensible.
+
+
+```{r}
+library(survival)
+
+cox_spline <- coxph(
+  Surv(time_days, melanoma_event) ~
+    pspline(age, df = 3) +
+    sex_label +
+    pspline(thickness, df = 3) +
+    ulcer_label,
+  data = melanoma_analysis
+)
+
+summary(cox_spline)
+```
+
+There is little evidence that age required nonlinear modeling. (p = 0.5300)
+
+For tumor thickness, the linear component (p = 0.0065) was strongly associated with melanoma mortality, while the additional nonlinear component (p = 0.1000) was not clearly supported.
+
+Given the relatively small number of melanoma deaths (n=57), the lack of compelling evidence for non linearity, and the greater interpretability of the simpler specification, age and tumor thickness were retained as linear continuous predictors.
+
+
+Because there was little evidence for nonlinear functional form but continued evidence of non-proportional hazards for thickness, lets look at thickness as a linear covariate and allow its coefficient to vary over time.
+
+
+```{r}
+cox_tv <- coxph(
+  Surv(time_days, melanoma_event) ~
+    age +
+    sex_label +
+    thickness +
+    ulcer_label +
+    tt(thickness),
+
+  data = melanoma_analysis,
+
+  tt = function(x, t, ...) {
+    x * log(t / 365.25)
+  }
+)
+
+summary(cox_tv)
+```
+
+The negative time interaction supported attenuation of the tumor-thickness association over follow-up. Because the current follow-up was expressed in years (time varying component), the main thickness coefficient corresponds to the effect at t=1, since log(1)=0.
+
+At one year, each additional millimeter of tumor thickness was associated with approximately a 20% higher melanoma-specific hazard. The estimated hazard ratio decreased with increasing follow-up and approached the null during later follow-up.
+
+These results support describing tumor thickness as an important early prognostic factor whose relative association with melanoma mortality attenuates over time, rather than assigning it a single constant hazard ratio across the entire observation period.
+
+
+Estimates during later follow-up should be interpreted cautiously because the risk set becomes progressively smaller and consists of patients who have survived earlier high-risk periods. 
+
+A hazard ratio approaching or crossing 1 at late follow-up should therefore not be interpreted as evidence that greater tumor thickness becomes protective.
+
+
+## Results for Question 1
+
+From the cause-specific hazard perspective, tumor ulceration was strongly associated with melanoma-specific mortality. 
+
+Tumor thickness was also prognostic, but its effect was not proportional over time: thicker tumors were associated with substantially greater melanoma mortality during early follow-up, with the association attenuating over time. 
+
+Age showed little evidence of a strong independent association, while male sex had an elevated but imprecisely estimated hazard.
+
+These results describe the rate of melanoma death among patients who remain at risk. They do not yet quantify the actual probability of melanoma death in the presence of competing mortality.
+
+
+## Approaching Question 2:
+
+A common survival-analysis approach to estimating melanoma mortality would be to treat deaths from other causes as censored observations and calculate 1 - S(t).
+
+This produces an estimate based on a hypothetical setting in which patients experiencing competing deaths are treated as though they could have remained at risk of melanoma death later. 
+
+For etiologic hazard estimation this censoring strategy is appropriate, but 1−KM does not represent the observed-world cumulative probability of melanoma death when competing events are present.
+
+I therefore calculated 1−KM as a deliberately naive benchmark against which the competing-risk estimate could be compared.
+
+Such inferences are easier to interpret using years in time rather than days.
+
+
+```{r}
+
+library(survival)
+
+km_naive <- survfit(
+  Surv(time_days/ 365.25, melanoma_event) ~ 1,
+  data = melanoma_analysis
+)
+
+summary(km_naive)
+```
+
+
+```{r}
+eval_times <- c(1, 3, 5, 8)
+
+km_summary <- summary(
+  km_naive,
+  times = eval_times,
+  extend = TRUE
+)
+
+km_risk <- data.frame(
+  time_years = km_summary$time,
+
+  # 1 - survival = estimated melanoma failure probability
+  naive_KM_risk = 1 - km_summary$surv,
+
+  # Reverse survival CI endpoints
+  lower_95 = 1 - km_summary$upper,
+  upper_95 = 1 - km_summary$lower
+)
+
+km_risk
+```
+
+To estimate the probability of melanoma death while recognizing that other-cause mortality permanently removes patients from the melanoma risk set, I next estimated the melanoma cumulative incidence function.
+
+The cumulative incidence F(t) = P[T <= t, J = M] represents the probability that melanoma death has occurred by time t in the presence of competing causes of death.
+
+
+```{r}
+library(cmprsk)
+
+cif_all <- cuminc(
+  ftime = melanoma_analysis$time_days / 365.25,
+  fstatus = melanoma_analysis$status_cr,
+  cencode = 0
+)
+
+print(cif_all)
+
+names(cif_all)
+```
+
+At 5 years, the naive 1−KM estimate of melanoma mortality was 23.12%, whereas the competing-risk cumulative incidence estimate was 22.35%, a difference of 0.77 percentage points.
+
+Because only 14 patients experienced competing deaths, explicitly accounting for competing mortality changed the absolute melanoma-risk estimate only modestly.
+
+
+```{r}
+cif_times <- timepoints(
+  cif_all,
+  times = eval_times
+)
+
+cif_times$est
+cif_times$var
+```
+
+
+```{r}
+melanoma_row <- grep(
+  " 1$",
+  rownames(cif_times$est),
+  value = TRUE
+)
+
+other_death_row <- grep(
+  " 2$",
+  rownames(cif_times$est),
+  value = TRUE
+)
+
+melanoma_row
+other_death_row
+```
+
+
+
+```{r}
+cif_melanoma <- as.numeric(
+  cif_times$est[melanoma_row, ]
+)
+
+cif_melanoma_se <- sqrt(
+  as.numeric(cif_times$var[melanoma_row, ])
+)
+
+cif_melanoma_table <- data.frame(
+  time_years = eval_times,
+  CIF_melanoma = cif_melanoma,
+  lower_95 = pmax(
+    0,
+    cif_melanoma - 1.96 * cif_melanoma_se
+  ),
+  upper_95 = pmin(
+    1,
+    cif_melanoma + 1.96 * cif_melanoma_se
+  )
+)
+
+cif_melanoma_table
+```
+
+```{r}
+cif_other <- as.numeric(
+  cif_times$est[other_death_row, ]
+)
+
+cif_other_table <- data.frame(
+  time_years = eval_times,
+  CIF_other_death = cif_other
+)
+
+cif_other_table
+```
+
+```{r}
+risk_comparison <- data.frame(
+  time_years = eval_times,
+  naive_KM = km_risk$naive_KM_risk,
+  competing_risk_CIF = cif_melanoma,
+  absolute_difference =
+    km_risk$naive_KM_risk - cif_melanoma
+)
+
+risk_comparison
+```
+
+```{r}
+risk_comparison <- risk_comparison |>
+  mutate(
+    naive_KM_pct = 100 * naive_KM,
+    competing_risk_CIF_pct = 100 * competing_risk_CIF,
+    difference_percentage_points =
+      100 * absolute_difference
+  )
+
+risk_comparison
+```
+
+Comparing the two methods across the entire follow-up period provides more information than examining a single time point. 
+
+Early in follow-up, when few competing deaths have occurred, the curves would be expected to remain similar. 
+
+Any divergence should accumulate as competing deaths remove individuals who would otherwise remain in the hypothetical Kaplan–Meier risk set.
+
+```{r}
+plot(
+  km_naive,
+  fun = "event",
+  conf.int = FALSE,
+  xlab = "Years since surgery",
+  ylab = "Estimated probability of melanoma death",
+  main = "Melanoma Mortality: Kaplan-Meier vs Competing Risks",
+  lwd = 2
+)
+```
+
+```{r}
+melanoma_curve_name <- grep(
+  " 1$",
+  names(cif_all),
+  value = TRUE
+)
+
+melanoma_curve_name
+```
+
+
+```{r}
+plot(
+  km_naive,
+  fun = "event",
+  conf.int = FALSE,
+  xlab = "Years since surgery",
+  ylab = "Estimated probability of melanoma death",
+  main = "Melanoma Mortality: Kaplan-Meier vs Competing Risks",
+  lwd = 2
+)
+
+lines(
+  cif_all[[melanoma_curve_name]]$time,
+  cif_all[[melanoma_curve_name]]$est,
+  type = "s",
+  lty = 2,
+  lwd = 2
+)
+
+legend(
+  "topleft",
+  legend = c(
+    "1 - Kaplan-Meier",
+    "Competing-risk CIF"
+  ),
+  lty = c(1, 2),
+  lwd = 2,
+  bty = "n"
+)
+```
+
+The cumulative incidence analysis quantifies melanoma mortality for the cohort but does not provide an adjusted regression analysis of how patient characteristics relate to that probability. 
+
+## Modeling for Question 2
+
+I therefore fitted a Fine–Gray proportional sub distribution-hazards model.
+
+This model complements rather than replaces the cause-specific Cox model. 
+
+The Cox model addresses covariate associations with the instantaneous melanoma-death rate among patients who remain event-free, whereas the Fine–Gray model relates covariates to the cumulative incidence of melanoma death in the presence of competing mortality.
+
+Cause-specific hazard ratios and Fine–Gray sub distribution hazard ratios correspond to different estimands and should not be interpreted as competing estimates of the same effect.
+
+I compared their direction, relative magnitude, uncertainty, and substantive conclusions to determine whether accounting for competing mortality materially altered the epidemiological interpretation of the covariates.
+
+```{r}
+
+X_fg <- model.matrix(
+  ~ age + sex_label + thickness + ulcer_label,
+  data = melanoma_analysis
+)[, -1]
+
+head(X_fg)
+colnames(X_fg)
+```
+
+
+```{r}
+fg_model <- crr(
+  ftime = melanoma_analysis$time_days,
+  fstatus = melanoma_analysis$status_cr,
+  cov1 = X_fg,
+  failcode = 1,
+  cencode = 0
+)
+
+summary(fg_model)
+```
+
+```{r}
+fg_beta <- fg_model$coef
+fg_se <- sqrt(diag(fg_model$var))
+
+fg_results <- data.frame(
+  term = names(fg_beta),
+
+  SHR = exp(fg_beta),
+
+  lower_95 = exp(
+    fg_beta - 1.96 * fg_se
+  ),
+
+  upper_95 = exp(
+    fg_beta + 1.96 * fg_se
+  ),
+
+  p_value = 2 * pnorm(
+    -abs(fg_beta / fg_se)
+  )
+)
+
+fg_results
+```
+
+```{r}
+cox_beta <- coef(cox_model)
+cox_se <- sqrt(diag(vcov(cox_model)))
+
+cox_results <- data.frame(
+  term = names(cox_beta),
+  CSHR = exp(cox_beta),
+  lower_95 = exp(cox_beta - 1.96 * cox_se),
+  upper_95 = exp(cox_beta + 1.96 * cox_se)
+)
+
+cox_results
+```
+
+```{r}
+cox_fg_comparison <- data.frame(
+  term = names(fg_beta),
+  cause_specific_HR = exp(cox_beta[names(fg_beta)]),
+  Fine_Gray_SHR = exp(fg_beta)
+)
+
+cox_fg_comparison
+```
+
+Both the models produce very similar results with the Fine Gray having relatively lower coefficient magnitudes but the direction is the same.
+
+
+## Model Assumptions
+
+Just as the Cox model assumes proportional cause-specific hazards, the standard Fine–Gray model assumes proportional sub distribution hazards. 
+
+Residual patterns were therefore examined to assess whether covariate effects appeared to change systematically over failure time.
+
+Because a predictor can satisfy or violate proportionality differently under cause-specific and sub distribution-hazard formulations, the Cox diagnostic results were not assumed to apply automatically to the Fine–Gray model.
+
+
+```{r}
+par(mfrow = c(2, 2))
+
+for (j in seq_len(ncol(X_fg))) {
+
+  plot(
+    fg_model$uftime/ 365.25,
+    fg_model$res[, j],
+    xlab = "Failure time (years)",
+    ylab = "Residual",
+    main = colnames(X_fg)[j]
+  )
+
+  abline(
+    h = 0,
+    lty = 2
+  )
+
+  lines(
+    lowess(
+      fg_model$uftime,
+      fg_model$res[, j]
+    ),
+    lwd = 2
+  )
+}
+
+par(mfrow = c(1, 1))
+```
+
+
+Tumor ulceration was the strongest prognostic characteristic in both the cause-specific Cox and Fine–Gray regression models. 
+
+To make this association more clinically interpretable, cumulative incidence functions were therefore estimated separately for patients with and without tumor ulceration.
+
+Unlike the regression analysis, these curves are unadjusted. They describe the observed cumulative incidence within the two ulceration groups without controlling for differences in age, sex, or tumor thickness.
+
+
+## Results
+
+```{r}
+cif_ulcer <- cuminc(
+  ftime = melanoma_analysis$time_days / 365.25,
+  fstatus = melanoma_analysis$status_cr,
+  group = melanoma_analysis$ulcer_label,
+  cencode = 0
+)
+
+print(cif_ulcer)
+```
+
+For melanoma-specific death, the cumulative incidence differed substantially according to ulceration status.
+
+At five years, the estimated cumulative incidence of melanoma death was 9.1% among patients without tumor ulceration, compared with 39.0% among patients with ulcerated tumors.
+
+By ten years, the corresponding estimates were approximately 18.2% for patients without ulceration and 53.3% for patients with ulceration.
+
+Thus, the absolute separation between the two melanoma-mortality curves increased considerably during follow-up. 
+
+The graphical pattern was consistent with the regression results, in which ulceration was associated with substantially greater melanoma mortality.
+
+```{r}
+plot(
+  cif_ulcer,
+  xlab = "Years since surgery",
+  ylab = "Cumulative incidence",
+  main = "Cumulative Incidence by Tumor Ulceration"
+)
+```
+
+
+Gray's test was used to compare the melanoma cumulative-incidence functions between the two ulceration groups. 
+
+The test provided strong evidence that the melanoma-death cumulative incidence differed by ulceration status (p-val: 3.2e-07).
+
+This provides strong evidence against equality of the melanoma cumulative-incidence functions between patients with and without ulceration.
+
+Importantly, this result should not be interpreted as an isolated causal effect of ulceration. 
+
+The cumulative-incidence curves are unadjusted, and ulceration may be associated with other tumor characteristics such as thickness. 
+
+The adjusted Fine–Gray model nevertheless produced a consistent finding, with ulceration associated with a sub distribution hazard ratio of approximately 3.09 after controlling for age, sex, and tumor thickness.
+
+## Inferences
+
+
+The cumulative incidence of death from causes other than melanoma was considerably lower than the cumulative incidence of melanoma death in both groups.
+
+At five years, estimated other-cause mortality was approximately 2.6% among patients without ulceration and 6.7% among patients with ulceration.
+
+At ten years, the corresponding estimates were approximately 13% and 8%.
+
+Despite these numerical differences, Gray's test provided no evidence that the cumulative incidence of competing mortality differed systematically according to ulceration status (p-val = 0.69).
+
+The strong difference between ulceration groups therefore appears specific to melanoma mortality rather than reflecting a general difference in mortality from other causes.
+
+
+The cumulative-incidence estimate for the ulcerated group was unavailable at 15 years. 
+
+This should not be interpreted as zero risk or an estimation failure; rather, there was insufficient follow-up information remaining in that group to provide an estimate at that time point.
+
+Taken together, the stratified cumulative-incidence analysis provides an intuitive absolute-risk representation of the ulceration association identified in the regression models. 
+
+Patients with ulcerated tumors experienced substantially greater melanoma-specific cumulative incidence throughout follow-up, whereas there was little evidence of a corresponding difference in competing mortality.
+
+This supports the conclusion that tumor ulceration is an important prognostic marker for melanoma mortality in this cohort.
+
+
+## Interpretation
+
+The analysis illustrates why melanoma mortality can be examined from more than one statistical perspective.
+
+The cause-specific Cox model showed that tumor ulceration was strongly associated with the instantaneous rate of melanoma death among patients who remained at risk. 
+
+Tumor thickness was also prognostic, but its effect was not constant over follow-up: the association was strongest during early follow-up and attenuated with time.
+
+When the estimand was changed from the cause-specific hazard to the absolute probability of melanoma death, explicitly accounting for competing mortality produced modestly lower melanoma-mortality estimates than the naive (1-KM) approach. 
+
+The difference increased over follow-up but remained relatively small because competing deaths were uncommon in this cohort.
+
+Fine–Gray regression produced broadly similar covariate conclusions to the cause-specific analysis. 
+
+Tumor ulceration remained the strongest prognostic characteristic, tumor thickness remained positively associated with melanoma mortality, while age and sex showed weaker and less precisely estimated associations.
+
+Finally, stratified cumulative-incidence curves provided a clinically interpretable illustration of the ulceration effect: melanoma cumulative incidence at five years was approximately 39% among patients with ulcerated tumors compared with 9% among those without ulceration, with strong evidence that the two melanoma cumulative-incidence functions differed.
+
+Overall, the analysis demonstrates that model choice should follow the scientific estimand. 
+
+Cause-specific Cox regression describes the rate of melanoma death among patients who remain at risk, whereas cumulative-incidence and Fine–Gray methods describe melanoma mortality in the observed population where death from another cause can prevent the event of interest.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
